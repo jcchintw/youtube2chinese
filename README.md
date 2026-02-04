@@ -30,7 +30,7 @@
 
 ```bash
 # Clone 專案
-git clone https://github.com/YOUR_USERNAME/youtube2chinese.git
+git clone https://github.com/jcchintw/youtube2chinese.git
 cd youtube2chinese
 
 # 安裝 Python 依賴
@@ -44,16 +44,24 @@ git clone https://github.com/ggerganov/whisper.cpp.git ~/.whisper.cpp
 cd ~/.whisper.cpp && make
 ```
 
-### 2. 設定 API Key
+### 2. 設定翻譯來源（三選一）
 
-翻譯需要 LLM API（二選一）：
-
+**選項 A：OpenClaw（推薦，如已安裝）**
 ```bash
-# OpenAI
-export OPENAI_API_KEY="your-api-key"
+# 無需設定 API Key，直接使用 OpenClaw 配置的 LLM
+python y2c.py video.mp4 -o ./output --translator openclaw
+```
 
-# 或 Google Gemini
+**選項 B：OpenAI**
+```bash
+export OPENAI_API_KEY="your-api-key"
+python y2c.py video.mp4 -o ./output --translator openai
+```
+
+**選項 C：Google Gemini**
+```bash
 export GOOGLE_API_KEY="your-api-key"
+python y2c.py video.mp4 -o ./output --translator gemini
 ```
 
 ### 3. 執行
@@ -100,7 +108,7 @@ output/
 | `input` | (必填) | YouTube URL 或本地影片路徑 |
 | `-o, --output-dir` | `./y2c_output` | 輸出目錄 |
 | `--api-key` | 環境變數 | 翻譯 API Key |
-| `--translator` | `openai` | 翻譯提供者 (openai/gemini) |
+| `--translator` | `openai` | 翻譯提供者 (openai/gemini/openclaw) |
 | `--translation-model` | 自動 | 翻譯模型 |
 | `--whisper-model` | `medium` | Whisper 模型 (tiny/base/small/medium/large) |
 | `--whisper-cpp-path` | `~/.whisper.cpp` | whisper.cpp 路徑 |

@@ -171,6 +171,74 @@ REQUIREMENTS:
     results.sort(key=lambda x: int(x['id']))
     return results
 
+def translate_openclaw(segments, batch_size=20):
+    """Translate segments using OpenClaw's configured LLM (via CLI)."""
+    
+    def translate_batch(batch):
+        prompt = """You are a professional subtitle translator. Translate the following subtitles into Traditional Chinese (Taiwan).
+REQUIREMENTS:
+1. Adaptive Translation: Keep the meaning but fit the time duration. Be concise and natural (spoken style).
+2. Output JSON ONLY: Return a list of objects with 'id' and 'text_zh'. No markdown, no explanation.
+3. Content:
+"""
+        input_list = [{"id": seg["id"], "duration": f"{seg['duration']:.1f}s", "text": seg["text"]} for seg in batch]
+        prompt += json.dumps(input_list, ensure_ascii=False)
+        
+        # Use openclaw CLI to send message and get response
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(prompt)
+            prompt_file = f.name
+        
+        try:
+            # Call openclaw gateway API via CLI
+            cmd = f'openclaw send --file "{prompt_file}" --wait --json 2>/dev/null'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                # Fallback: use curl to gateway API
+                import urllib.request
+                import urllib.parse
+                
+                gateway_url = os.environ.get("OPENCLAW_GATEWAY_URL", "http://localhost:18789")
+                gateway_token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+                
+                headers = {"Content-Type": "application/json"}
+                if gateway_token:
+                    headers["Authorization"] = f"Bearer {gateway_token}"
+                
+                data = json.dumps({"message": prompt, "model": "gemini-high"}).encode()
+                req = urllib.request.Request(f"{gateway_url}/api/chat", data=data, headers=headers)
+                
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    response_data = json.loads(resp.read().decode())
+                    text = response_data.get("content", response_data.get("text", ""))
+            else:
+                text = result.stdout
+            
+            # Parse JSON from response
+            json_match = re.search(r'\[.*\]', text, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+            return json.loads(text)
+        finally:
+            os.unlink(prompt_file)
+    
+    results = []
+    batches = [segments[i:i+batch_size] for i in range(0, len(segments), batch_size)]
+    
+    for i, batch in enumerate(batches):
+        print(f"Translated batch {i+1}/{len(batches)} (via OpenClaw)")
+        batch_result = translate_batch(batch)
+        for res in batch_result:
+            seg = next((s for s in segments if str(s['id']) == str(res.get('id'))), None)
+            if seg:
+                seg['text_zh'] = res.get('text_zh', '')
+                results.append(seg)
+    
+    results.sort(key=lambda x: int(x['id']))
+    return results
+
 def translate_gemini(segments, api_key, model="gemini-1.5-pro", batch_size=20):
     """Translate segments using Google Gemini API."""
     import google.generativeai as genai
@@ -387,6 +455,8 @@ def run_pipeline(args):
     elif args.translator == "gemini":
         api_key = args.api_key or os.environ.get("GOOGLE_API_KEY")
         segments = translate_gemini(segments, api_key, model=args.translation_model)
+    elif args.translator == "openclaw":
+        segments = translate_openclaw(segments)
     
     # Save translated data
     translated_json = work_dir / "translated.json"
@@ -450,6 +520,9 @@ Examples:
   # Use Gemini for translation
   python y2c.py video.mp4 -o ./output --translator gemini --api-key YOUR_GEMINI_KEY
   
+  # Use OpenClaw (no API key needed if OpenClaw is running)
+  python y2c.py video.mp4 -o ./output --translator openclaw
+  
   # Custom TTS voice
   python y2c.py video.mp4 -o ./output --tts-voice zh-CN-XiaoxiaoNeural
 """
@@ -458,7 +531,7 @@ Examples:
     parser.add_argument("input", help="YouTube URL or local video file path")
     parser.add_argument("-o", "--output-dir", default="./y2c_output", help="Output directory")
     parser.add_argument("--api-key", help="API key for translation (or set OPENAI_API_KEY/GOOGLE_API_KEY env)")
-    parser.add_argument("--translator", choices=["openai", "gemini"], default="openai", help="Translation provider")
+    parser.add_argument("--translator", choices=["openai", "gemini", "openclaw"], default="openai", help="Translation provider")
     parser.add_argument("--translation-model", default=None, help="Translation model (default: gpt-4o for OpenAI, gemini-1.5-pro for Gemini)")
     parser.add_argument("--whisper-model", default="medium", help="Whisper model size (tiny/base/small/medium/large)")
     parser.add_argument("--whisper-cpp-path", default=None, help="Path to whisper.cpp directory")
@@ -468,7 +541,11 @@ Examples:
     
     # Set default translation model based on provider
     if args.translation_model is None:
-        args.translation_model = "gpt-4o" if args.translator == "openai" else "gemini-1.5-pro"
+        if args.translator == "openai":
+            args.translation_model = "gpt-4o"
+        elif args.translator == "gemini":
+            args.translation_model = "gemini-1.5-pro"
+        # openclaw uses configured model, no default needed
     
     run_pipeline(args)
 
