@@ -126,6 +126,59 @@ def parse_srt(srt_path):
         })
     return segments
 
+def smart_merge_segments(segments):
+    """Intelligently merge incomplete English sentences.
+
+    Merge rules:
+    1. If previous segment doesn't end with . ? ! and next starts with lowercase → merge
+    2. Merged segment uses first's start, last's end
+    3. Text joined with spaces
+    4. Uses first segment's id
+    5. Total duration must not exceed 15 seconds
+    """
+    if not segments:
+        return []
+
+    result = []
+    i = 0
+
+    while i < len(segments):
+        current = segments[i].copy()
+
+        # Try to merge subsequent segments
+        while i + 1 < len(segments):
+            next_seg = segments[i + 1]
+
+            # Check merge conditions
+            current_text = current['text'].strip()
+            next_text = next_seg['text'].strip()
+
+            # Condition 1: Current doesn't end with sentence-ending punctuation
+            ends_with_punct = current_text and current_text[-1] in '.?!'
+
+            # Condition 2: Next starts with lowercase letter
+            starts_lowercase = next_text and next_text[0].islower()
+
+            # Calculate merged duration
+            merged_end = srt_time_to_sec(next_seg['end'])
+            merged_start = srt_time_to_sec(current['start'])
+            merged_duration = merged_end - merged_start
+
+            # Merge if conditions are met
+            if not ends_with_punct and starts_lowercase and merged_duration <= 15.0:
+                # Merge the segments
+                current['end'] = next_seg['end']
+                current['text'] = current['text'].strip() + ' ' + next_text
+                current['duration'] = merged_duration
+                i += 1
+            else:
+                break
+
+        result.append(current)
+        i += 1
+
+    return result
+
 # ============================================================================
 # Step 3: Translation
 # ============================================================================
@@ -442,7 +495,12 @@ def run_pipeline(args):
     )
     segments = parse_srt(srt_path)
     print(f"Transcribed: {len(segments)} segments")
-    
+
+    # Merge incomplete sentences
+    print("Merging incomplete sentence segments...")
+    segments = smart_merge_segments(segments)
+    print(f"After merging: {len(segments)} segments")
+
     # Save English SRT
     english_srt = work_dir / "subtitles" / "english.srt"
     run_cmd(f'cp "{srt_path}" "{english_srt}"')
