@@ -179,6 +179,59 @@ def smart_merge_segments(segments):
 
     return result
 
+
+def group_segments_for_tts(segments, max_duration=8.0, gap_threshold=0.5):
+    """Group segments by sentences for TTS generation.
+    
+    This keeps original segments for subtitles but groups them for TTS
+    so Chinese audio doesn't pause mid-sentence.
+    
+    Break conditions:
+    1. Sentence ends with . ? !
+    2. Gap to next segment > gap_threshold
+    3. Group duration > max_duration
+    """
+    if not segments:
+        return []
+    
+    groups = []
+    current_group = []
+    
+    for i, seg in enumerate(segments):
+        current_group.append(seg)
+        text = seg['text'].strip()
+        ends_sentence = text and text[-1] in '.?!'
+        
+        # Calculate group duration
+        group_start = srt_time_to_sec(current_group[0]['start'])
+        group_end = srt_time_to_sec(seg['end'])
+        duration = group_end - group_start
+        
+        # Check gap to next segment
+        gap = 0
+        if i + 1 < len(segments):
+            next_start = srt_time_to_sec(segments[i + 1]['start'])
+            gap = next_start - group_end
+        
+        # Break conditions
+        should_break = ends_sentence or gap > gap_threshold or duration > max_duration or i == len(segments) - 1
+        
+        if should_break and current_group:
+            group = {
+                'group_id': len(groups) + 1,
+                'ids': [s['id'] for s in current_group],
+                'start': current_group[0]['start'],
+                'end': current_group[-1]['end'],
+                'start_sec': srt_time_to_sec(current_group[0]['start']),
+                'end_sec': srt_time_to_sec(current_group[-1]['end']),
+                'text_zh': ''.join(s.get('text_zh', '') for s in current_group)
+            }
+            group['duration'] = group['end_sec'] - group['start_sec']
+            groups.append(group)
+            current_group = []
+    
+    return groups
+
 # ============================================================================
 # Step 3: Translation
 # ============================================================================
@@ -334,25 +387,54 @@ REQUIREMENTS:
 # Step 4: Text-to-Speech (Edge-TTS)
 # ============================================================================
 
-def generate_tts(segments, output_dir, voice=DEFAULT_TTS_VOICE):
-    """Generate TTS audio for each segment using edge-tts."""
+def generate_tts(segments, output_dir, voice=DEFAULT_TTS_VOICE, parallel=True, max_workers=10):
+    """Generate TTS audio for each segment using edge-tts.
+    
+    Args:
+        segments: List of segments with 'text_zh' field
+        output_dir: Directory to save audio files
+        voice: TTS voice name
+        parallel: Use parallel processing (default True)
+        max_workers: Number of parallel workers (default 10)
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    for i, seg in enumerate(segments):
-        out_path = output_dir / f"seg_{int(seg['id']):04d}.mp3"
+    def gen_single(seg):
+        # Support both segment format (id) and group format (group_id)
+        seg_id = seg.get('group_id', seg.get('id'))
+        prefix = 'group' if 'group_id' in seg else 'seg'
+        out_path = output_dir / f"{prefix}_{int(seg_id):04d}.mp3"
+        
         if out_path.exists():
-            continue
+            return seg_id, True
         
         text = seg.get('text_zh', '').strip()
         if not text:
-            continue
+            return seg_id, False
         
-        cmd = f'edge-tts --text "{text}" --voice {voice} --write-media "{out_path}"'
-        run_cmd(cmd, check=False)
-        
-        if (i + 1) % 20 == 0:
-            print(f"TTS progress: {i+1}/{len(segments)}")
+        try:
+            subprocess.run(
+                ["edge-tts", "--text", text, "--voice", voice, "--write-media", str(out_path)],
+                check=True, capture_output=True
+            )
+            return seg_id, True
+        except:
+            return seg_id, False
+    
+    if parallel:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(gen_single, seg): seg for seg in segments}
+            done = 0
+            for fut in as_completed(futures):
+                done += 1
+                if done % 30 == 0 or done == len(segments):
+                    print(f"TTS progress: {done}/{len(segments)}")
+    else:
+        for i, seg in enumerate(segments):
+            gen_single(seg)
+            if (i + 1) % 20 == 0:
+                print(f"TTS progress: {i+1}/{len(segments)}")
     
     print(f"TTS completed: {len(segments)} segments")
     return output_dir
