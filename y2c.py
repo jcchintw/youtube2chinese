@@ -444,65 +444,62 @@ def generate_tts(segments, output_dir, voice=DEFAULT_TTS_VOICE, parallel=True, m
 # ============================================================================
 
 def align_audio(segments, audio_dir, output_path):
-    """Align TTS audio to original timestamps."""
+    """Align TTS audio to original timestamps.
+    
+    Fixed in v5.1: Each audio segment is forced to fit exactly within its
+    target duration using speed adjustment + truncation/padding.
+    """
     audio_dir = Path(audio_dir)
     output_path = Path(output_path)
     
     # Sort segments by start time
     segments = sorted(segments, key=lambda x: srt_time_to_sec(x['start']))
     
-    concat_list = []
-    last_end = 0.0
     temp_files = []
     
+    # Step 1: Create audio files that fit exactly in target duration
     for seg in segments:
-        seg_id = int(seg['id'])
+        seg_id = seg.get('group_id', seg.get('id'))
+        prefix = 'group' if 'group_id' in seg else 'seg'
         start = srt_time_to_sec(seg['start'])
         end = srt_time_to_sec(seg['end'])
         target_duration = max(0.0, end - start)
         
-        audio_path = audio_dir / f"seg_{seg_id:04d}.mp3"
+        audio_path = audio_dir / f"{prefix}_{int(seg_id):04d}.mp3"
         if not audio_path.exists():
             continue
         
-        # Add silence gap if needed
-        if start > last_end + 0.01:
-            gap = start - last_end
-            silence_path = audio_dir / f"silence_{int(last_end*1000)}.wav"
-            if not silence_path.exists():
-                cmd = f'ffmpeg -y -f lavfi -i anullsrc=channel_layout=mono:sample_rate={SILENCE_SAMPLE_RATE} -t {gap} "{silence_path}"'
-                run_cmd(cmd)
-                temp_files.append(silence_path)
-            concat_list.append(str(silence_path))
-            last_end = start
-        
-        # Adjust audio speed if needed
         orig_duration = get_audio_duration(str(audio_path))
-        speed = 1.0
+        fit_path = audio_dir / f"fit_{int(seg_id):04d}.wav"
+        
         if orig_duration > target_duration and target_duration > 0.05:
-            speed = min(MAX_TTS_SPEEDUP, orig_duration / target_duration)
-        
-        adj_path = audio_dir / f"seg_{seg_id:04d}_adj.wav"
-        if abs(speed - 1.0) > 0.01:
-            cmd = f'ffmpeg -y -i "{audio_path}" -filter:a "atempo={speed}" -ar {SILENCE_SAMPLE_RATE} "{adj_path}"'
+            # Speed up and truncate to exact target duration
+            speed = min(1.5, orig_duration / target_duration)
+            cmd = f'ffmpeg -y -i "{audio_path}" -filter:a "atempo={speed}" -t {target_duration} -ar {SILENCE_SAMPLE_RATE} "{fit_path}"'
         else:
-            cmd = f'ffmpeg -y -i "{audio_path}" -ar {SILENCE_SAMPLE_RATE} "{adj_path}"'
+            # Pad with silence to exact target duration
+            cmd = f'ffmpeg -y -i "{audio_path}" -af "apad=whole_dur={target_duration}" -ar {SILENCE_SAMPLE_RATE} "{fit_path}"'
+        
         run_cmd(cmd)
-        temp_files.append(adj_path)
-        
-        adj_duration = get_audio_duration(str(adj_path))
-        concat_list.append(str(adj_path))
-        last_end += adj_duration
-        
-        # Add padding if audio is shorter than target
-        pad = max(0.0, target_duration - adj_duration)
-        if pad > 0.01:
-            pad_path = audio_dir / f"pad_{seg_id:04d}.wav"
-            cmd = f'ffmpeg -y -f lavfi -i anullsrc=channel_layout=mono:sample_rate={SILENCE_SAMPLE_RATE} -t {pad} "{pad_path}"'
+        temp_files.append((start, fit_path))
+    
+    # Step 2: Build final audio with gaps
+    temp_files.sort(key=lambda x: x[0])
+    concat_list = []
+    current_time = 0.0
+    
+    for start, path in temp_files:
+        # Insert silence gap if needed
+        if start > current_time + 0.01:
+            gap = start - current_time
+            silence_path = audio_dir / f"gap_{int(current_time*1000)}.wav"
+            cmd = f'ffmpeg -y -f lavfi -i anullsrc=channel_layout=mono:sample_rate={SILENCE_SAMPLE_RATE} -t {gap} "{silence_path}"'
             run_cmd(cmd)
-            temp_files.append(pad_path)
-            concat_list.append(str(pad_path))
-            last_end += pad
+            concat_list.append(str(silence_path))
+            current_time = start
+        
+        concat_list.append(str(path))
+        current_time += get_audio_duration(str(path))
     
     # Concatenate all audio
     list_file = audio_dir / "concat_list.txt"
@@ -532,6 +529,7 @@ def synthesize_video(video_path, audio_path, srt_path, output_path):
     cmd = f'''ffmpeg -y -i "{video_path}" -i "{audio_path}" -i "{srt_path}" \
         -map 0:v -map 1:a -map 2:s \
         -c:v copy -c:a aac -c:s mov_text \
+        -shortest \
         -metadata:s:s:0 language=chi \
         "{output_path}"'''
     run_cmd(cmd)
